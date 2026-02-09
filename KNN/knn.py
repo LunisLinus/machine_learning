@@ -67,35 +67,3 @@ class KNNClassifier:
         if self.metric == "euclidean":
             return self._euclidean_distance(a, b)
         return self._manhattan_distance(a, b)
-
-
-def run_comparison_demo() -> None:
-    x, y = load_iris(return_X_y=True)
-    x_train, x_test, y_train, y_test = train_test_split(
-        x, y, test_size=0.3, random_state=42, stratify=y
-    )
-
-    for metric in ("euclidean", "manhattan"):
-        custom_model = KNNClassifier(k=5, metric=metric)
-        custom_model.fit(x_train, y_train)
-        custom_pred = custom_model.predict(x_test)
-        custom_acc = accuracy_score(y_test, custom_pred)
-
-        sklearn_metric = "minkowski" if metric == "euclidean" else "manhattan"
-        sklearn_p = 2 if metric == "euclidean" else 1
-        sklearn_model = KNeighborsClassifier(
-            n_neighbors=5, metric=sklearn_metric, p=sklearn_p
-        )
-        sklearn_model.fit(x_train, y_train)
-        sklearn_pred = sklearn_model.predict(x_test)
-        sklearn_acc = accuracy_score(y_test, sklearn_pred)
-
-        print(f"Metric: {metric}")
-        print(f"  Custom KNN accuracy:  {custom_acc:.4f}")
-        print(f"  sklearn KNN accuracy: {sklearn_acc:.4f}")
-        print(f"  Predictions match:    {custom_pred == list(sklearn_pred)}")
-        print()
-
-
-if __name__ == "__main__":
-    run_comparison_demo()
