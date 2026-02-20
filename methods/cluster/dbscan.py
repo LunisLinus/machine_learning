@@ -37,32 +37,6 @@ def _pairwise_squared_distances(X: np.ndarray) -> np.ndarray:
 
 
 class CustomDBSCAN:
-    """
-    Собственная реализация DBSCAN (Density-Based Spatial Clustering of Applications with Noise).
-
-    Реализовано для метрики Евклида. Алгоритм использует полную матрицу расстояний O(n^2),
-    поэтому предназначен для учебных/демонстрационных размеров выборок.
-
-    Параметры
-    ---------
-    eps:
-        Радиус окрестности.
-    min_samples:
-        Минимальное число точек в eps-окрестности (включая саму точку),
-        чтобы точка считалась core.
-    metric:
-        Поддерживается только 'euclidean'.
-
-    Атрибуты после fit
-    ------------------
-    labels_:
-        Метки кластеров, шум = -1.
-    core_sample_indices_:
-        Индексы core-точек.
-    n_features_in_:
-        Число признаков.
-    """
-
     def __init__(self, eps: float = 0.5, min_samples: int = 5, metric: Metric = "euclidean") -> None:
         _validate_params(eps=eps, min_samples=min_samples, metric=metric)
         self.eps = float(eps)
@@ -74,18 +48,10 @@ class CustomDBSCAN:
         self.n_features_in_: Optional[int] = None
 
     def get_params(self, deep: bool = True) -> Dict[str, Any]:
-        """
-        Вернуть параметры модели в формате sklearn.
-        """
-
         _ = deep
         return {"eps": self.eps, "min_samples": self.min_samples, "metric": self.metric}
 
     def set_params(self, **params: Any) -> "CustomDBSCAN":
-        """
-        Установить параметры модели в формате sklearn.
-        """
-
         for key, value in params.items():
             if not hasattr(self, key):
                 raise ValueError(f"Неизвестный параметр: {key}")
@@ -93,15 +59,6 @@ class CustomDBSCAN:
         return self
 
     def fit(self, X: Any) -> "CustomDBSCAN":
-        """
-        Выполнить кластеризацию DBSCAN.
-
-        Parameters
-        ----------
-        X:
-            Матрица признаков формы (n_samples, n_features).
-        """
-
         X_arr = _as_2d_float_array(X)
         _validate_params(eps=self.eps, min_samples=self.min_samples, metric=self.metric)
 
@@ -147,10 +104,6 @@ class CustomDBSCAN:
         return self
 
     def fit_predict(self, X: Any) -> np.ndarray:
-        """
-        Выполнить fit и вернуть labels_.
-        """
-
         self.fit(X)
         assert self.labels_ is not None
         return self.labels_
