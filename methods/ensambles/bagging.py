@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Literal, Optional
 import numpy as np
 from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
 
-from ensambles.random_forest import _as_1d_array, _as_2d_float_array, _validate_basic_params
+from methods.ensambles.random_forest import _as_1d_array, _as_2d_float_array, _validate_basic_params
 
 
 @dataclass(frozen=True)
