@@ -12,6 +12,7 @@ __MACOSX
 .DS_Store
 *.jpg
 *.png
+*.gif
 
 # Distribution / packaging
 .Python
