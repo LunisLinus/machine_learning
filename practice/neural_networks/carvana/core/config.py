@@ -16,15 +16,17 @@ class CarvanaConfig:
     workdir: Path = Path(__file__).resolve().parents[1] / "carvana_work"
     seed: int = 42
     val_size: float = 0.2
-    debug_max_samples: int | None = None
-    num_workers: int = min(4, os.cpu_count() or 2)
+    debug_max_samples: int | None = 2048
+    num_workers: int = min(8, os.cpu_count() or 2)
     img_size: tuple[int, int] = (256, 256)
-    batch_size: int = 16 if torch.cuda.is_available() else 4
+    batch_size: int = 32 if torch.cuda.is_available() else 8
     epochs: int = 10
     lr: float = 1e-3
     encoder_name: str = "mobilenet_v2"
     threshold: float = 0.5
-    validate_every: int = 2
+    validate_every: int = 5
+    max_train_steps: int | None = 64
+    max_val_steps: int | None = 16
 
     @property
     def raw_dir(self) -> Path:

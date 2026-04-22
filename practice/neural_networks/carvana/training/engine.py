@@ -31,6 +31,7 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None = None,
     threshold: float = 0.5,
     scaler: torch.amp.GradScaler | None = None,
+    max_steps: int | None = None,
 ) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -40,7 +41,7 @@ def run_epoch(
     dices: list[float] = []
     progress = tqdm(loader, leave=False)
 
-    for images, masks in progress:
+    for step, (images, masks) in enumerate(progress, start=1):
         images = images.to(device, non_blocking=True).to(memory_format=torch.channels_last)
         masks = masks.to(device, non_blocking=True)
 
@@ -67,6 +68,9 @@ def run_epoch(
             dices.append(dice)
             progress.set_description(f"valid loss={np.mean(losses):.4f} dice={np.mean(dices):.4f}")
 
+        if max_steps is not None and step >= max_steps:
+            break
+
     return {
         "loss": float(np.mean(losses)),
         "iou": float(np.mean(ious)) if ious else float("nan"),
@@ -88,6 +92,8 @@ def train_model(
     model_dir,
     threshold: float,
     validate_every: int,
+    max_train_steps: int | None,
+    max_val_steps: int | None,
 ) -> tuple[pd.DataFrame, str]:
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
@@ -107,6 +113,7 @@ def train_model(
             optimizer=optimizer,
             threshold=threshold,
             scaler=scaler,
+            max_steps=max_train_steps,
         )
 
         if epoch % validate_every == 0 or epoch == epochs:
@@ -118,6 +125,7 @@ def train_model(
                 use_amp=use_amp,
                 optimizer=None,
                 threshold=threshold,
+                max_steps=max_val_steps,
             )
             scheduler.step(val_metrics["dice"])
         else:
@@ -203,6 +211,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--img-size", type=int, nargs=2, metavar=("H", "W"), default=None)
     parser.add_argument("--validate-every", type=int, default=None)
     parser.add_argument("--debug-max-samples", type=int, default=None)
+    parser.add_argument("--max-train-steps", type=int, default=None)
+    parser.add_argument("--max-val-steps", type=int, default=None)
+    parser.add_argument("--full-dataset", action="store_true")
+    parser.add_argument("--run-bce", action="store_true")
     parser.add_argument("--skip-bce", action="store_true")
     parser.add_argument("--skip-dice", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
@@ -228,6 +240,14 @@ def main() -> None:
         config.validate_every = args.validate_every
     if args.debug_max_samples is not None:
         config.debug_max_samples = args.debug_max_samples
+    if args.max_train_steps is not None:
+        config.max_train_steps = args.max_train_steps
+    if args.max_val_steps is not None:
+        config.max_val_steps = args.max_val_steps
+    if args.full_dataset:
+        config.debug_max_samples = None
+        config.max_train_steps = None
+        config.max_val_steps = None
 
     device, use_amp = prepare_runtime(config)
     print("device:", device)
@@ -241,7 +261,10 @@ def main() -> None:
     histories: dict[str, pd.DataFrame] = {}
     best_paths: dict[str, str] = {}
 
-    if not args.skip_bce:
+    run_bce = args.run_bce and not args.skip_bce
+    run_dice = not args.skip_dice
+
+    if run_bce:
         bce_model = make_smp_unet(config.encoder_name).to(device).to(memory_format=torch.channels_last)
         bce_history, bce_best_path = train_model(
             model=bce_model,
@@ -257,11 +280,13 @@ def main() -> None:
             model_dir=config.model_dir,
             threshold=config.threshold,
             validate_every=config.validate_every,
+            max_train_steps=config.max_train_steps,
+            max_val_steps=config.max_val_steps,
         )
         histories["BCE"] = bce_history
         best_paths["BCE"] = bce_best_path
 
-    if not args.skip_dice:
+    if run_dice:
         dice_model = make_smp_unet(config.encoder_name).to(device).to(memory_format=torch.channels_last)
         dice_history, dice_best_path = train_model(
             model=dice_model,
@@ -277,6 +302,8 @@ def main() -> None:
             model_dir=config.model_dir,
             threshold=config.threshold,
             validate_every=config.validate_every,
+            max_train_steps=config.max_train_steps,
+            max_val_steps=config.max_val_steps,
         )
         histories["DiceLoss"] = dice_history
         best_paths["DiceLoss"] = dice_best_path
