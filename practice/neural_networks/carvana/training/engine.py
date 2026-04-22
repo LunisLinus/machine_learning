@@ -11,9 +11,15 @@ import torch
 from albumentations.pytorch import ToTensorV2
 from tqdm.auto import tqdm
 
-from ..core.config import IMAGENET_MEAN, IMAGENET_STD, CarvanaConfig, prepare_runtime
-from ..datasets.carvana_data import build_splits, create_loaders, load_mask, load_rgb
-from ..modeling.segmentation import BCE_LOSS, DICE_LOSS, batch_iou_dice_from_logits, binary_scores, make_smp_unet
+try:
+    from ..core.config import IMAGENET_MEAN, IMAGENET_STD, CarvanaConfig, prepare_runtime
+    from ..datasets.carvana_data import build_splits, create_loaders, load_mask, load_rgb
+    from ..modeling.segmentation import BCE_LOSS, DICE_LOSS, batch_iou_dice_from_logits, binary_scores, make_smp_unet
+except ImportError:
+    # Fallback for direct script-style launches where `carvana` is not imported as a package.
+    from core.config import IMAGENET_MEAN, IMAGENET_STD, CarvanaConfig, prepare_runtime
+    from datasets.carvana_data import build_splits, create_loaders, load_mask, load_rgb
+    from modeling.segmentation import BCE_LOSS, DICE_LOSS, batch_iou_dice_from_logits, binary_scores, make_smp_unet
 
 
 def run_epoch(
