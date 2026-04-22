@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "carvana-segmentation"
+version = "0.1.0"
+description = "Carvana image segmentation training package"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "albumentations",
+    "matplotlib",
+    "numpy",
+    "opencv-python-headless",
+    "pandas",
+    "requests",
+    "scikit-learn",
+    "segmentation-models-pytorch",
+    "torch",
+    "tqdm",
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["carvana*"]
