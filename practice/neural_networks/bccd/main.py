@@ -22,10 +22,10 @@ import pandas as pd
 import requests
 import torch
 from PIL import Image, ImageDraw, ImageFilter
-from sklearn.metrics import confusion_matrix, mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score, roc_auc_score
 from sklearn.model_selection import train_test_split
 from torch import nn
-from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 try:
@@ -37,8 +37,6 @@ except ImportError:
 
 CLASSES = ["RBC", "WBC", "Platelets"]
 CLASS_TO_ID = {name: idx for idx, name in enumerate(CLASSES)}
-COUNT_RANGES = {"RBC": 30, "WBC": 3, "Platelets": 6}
-LOSS_WEIGHTS = {"RBC": 1.0, "WBC": 0.5, "Platelets": 2.0}
 BCCD_URL = "https://github.com/Shenggan/BCCD_Dataset/archive/refs/heads/master.zip"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 BASE_DIR = Path(__file__).resolve().parent
@@ -255,25 +253,22 @@ class BCCDCountDataset(Dataset):
         df: pd.DataFrame,
         image_size: int,
         train: bool,
-        copy_paste_platelets: bool = True,
+        target_mean: np.ndarray | None = None,
+        target_std: np.ndarray | None = None,
     ):
         require_torchvision()
         self.df = df.reset_index(drop=True)
-        self.train = train
-        self.copy_paste_platelets = copy_paste_platelets
-        aug = []
+        self.target_mean = target_mean
+        self.target_std = target_std
+        aug = [
+            transforms.Resize((image_size, image_size)),
+        ]
         if train:
             aug += [
-                transforms.RandomResizedCrop(image_size, scale=(0.72, 1.0), ratio=(0.9, 1.1)),
                 transforms.RandomHorizontalFlip(),
                 transforms.RandomVerticalFlip(),
-                transforms.RandomRotation(10),
-                transforms.RandomAffine(degrees=0, scale=(1.0, 1.15)),
-                transforms.ColorJitter(brightness=0.10, contrast=0.28, saturation=0.08),
-                transforms.RandomAdjustSharpness(sharpness_factor=1.8, p=0.35),
+                transforms.ColorJitter(brightness=0.12, contrast=0.12, saturation=0.08),
             ]
-        else:
-            aug.append(transforms.Resize((image_size, image_size)))
         aug += [
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -286,50 +281,14 @@ class BCCDCountDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         row = self.df.iloc[idx]
         image = Image.open(row.image_path).convert("RGB")
-        target_np = np.array(
-            [min(max(int(row[c]), 0), COUNT_RANGES[c]) for c in CLASSES],
-            dtype=np.int64,
-        )
-        if self.train and self.copy_paste_platelets and target_np[2] > 0 and target_np[2] < COUNT_RANGES["Platelets"]:
-            image, target_np = self.copy_paste_platelets_aug(image, row, target_np)
-        target = torch.tensor(target_np, dtype=torch.long)
+        target_np = np.array([row[c] for c in CLASSES], dtype=np.float32)
+        if self.target_mean is not None and self.target_std is not None:
+            target_np = (target_np - self.target_mean) / self.target_std
+        target = torch.tensor(target_np, dtype=torch.float32)
         return self.transform(image), target
 
-    def copy_paste_platelets_aug(self, image: Image.Image, row: pd.Series, target: np.ndarray) -> tuple[Image.Image, np.ndarray]:
-        if random.random() > 0.65:
-            return image, target
-        boxes = row.boxes
-        if isinstance(boxes, str):
-            boxes = json.loads(boxes)
-        platelet_boxes = [box for box in boxes if box.get("class") == "Platelets"]
-        if not platelet_boxes:
-            return image, target
 
-        image = image.copy()
-        max_extra = COUNT_RANGES["Platelets"] - int(target[2])
-        repeats = min(max_extra, random.randint(1, 2))
-        for _ in range(repeats):
-            box = random.choice(platelet_boxes)
-            crop = image.crop(
-                (
-                    int(max(0, box["xmin"])),
-                    int(max(0, box["ymin"])),
-                    int(min(image.width, box["xmax"])),
-                    int(min(image.height, box["ymax"])),
-                )
-            )
-            if crop.width < 3 or crop.height < 3:
-                continue
-            scale = random.uniform(1.0, 1.35)
-            crop = crop.resize((max(3, int(crop.width * scale)), max(3, int(crop.height * scale))))
-            x = random.randint(0, max(0, image.width - crop.width))
-            y = random.randint(0, max(0, image.height - crop.height))
-            image.paste(crop, (x, y))
-            target[2] = min(COUNT_RANGES["Platelets"], target[2] + 1)
-        return image, target
-
-
-class CountClassifier(nn.Module):
+class CountRegressor(nn.Module):
     def __init__(self, pretrained: bool = False, freeze_backbone: bool = True):
         super().__init__()
         require_torchvision()
@@ -341,110 +300,59 @@ class CountClassifier(nn.Module):
         if freeze_backbone:
             for parameter in self.backbone.parameters():
                 parameter.requires_grad = False
-        self.shared_head = nn.Sequential(
+        self.head = nn.Sequential(
             nn.Linear(in_features, 256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.2),
+            nn.Linear(256, len(CLASSES)),
         )
-        self.rbc_head = nn.Linear(256, COUNT_RANGES["RBC"] + 1)
-        self.wbc_head = nn.Linear(256, COUNT_RANGES["WBC"] + 1)
-        self.platelets_head = nn.Linear(256, COUNT_RANGES["Platelets"] + 1)
 
     def features(self, x: torch.Tensor) -> torch.Tensor:
         return self.backbone(x)
 
-    def forward(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
-        features = self.shared_head(self.features(x))
-        return {
-            "RBC": self.rbc_head(features),
-            "WBC": self.wbc_head(features),
-            "Platelets": self.platelets_head(features),
-        }
-
-
-CountRegressor = CountClassifier
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.head(self.features(x))
 
 
 @torch.no_grad()
 def predict_counts(
-    model: CountClassifier,
+    model: CountRegressor,
     loader: DataLoader,
     device: torch.device,
-    bias: dict[str, int] | None = None,
+    target_mean: np.ndarray | None = None,
+    target_std: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     preds, targets = [], []
     for images, y in loader:
         images = images.to(device)
-        logits = model(images)
-        pred = np.column_stack([logits[cls].argmax(dim=1).cpu().numpy() for cls in CLASSES])
-        if bias:
-            for idx, cls in enumerate(CLASSES):
-                pred[:, idx] += int(bias.get(cls, 0))
-        for idx, cls in enumerate(CLASSES):
-            pred[:, idx] = np.clip(pred[:, idx], 0, COUNT_RANGES[cls])
+        pred = model(images).cpu().numpy()
+        y_np = y.numpy()
+        if target_mean is not None and target_std is not None:
+            pred = pred * target_std + target_mean
+            y_np = y_np * target_std + target_mean
+        pred = np.clip(pred, 0, None)
         preds.append(pred)
-        targets.append(y.numpy())
+        targets.append(y_np)
     return np.vstack(preds), np.vstack(targets)
 
 
 def count_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     result = {}
-    rounded = np.rint(np.clip(y_pred, 0, None)).astype(int)
-    y_true = y_true.astype(int)
+    rounded = np.rint(np.clip(y_pred, 0, None))
     for idx, cls in enumerate(CLASSES):
-        labels = list(range(COUNT_RANGES[cls] + 1))
         result[cls] = {
             "mae": float(mean_absolute_error(y_true[:, idx], rounded[:, idx])),
             "rmse": float(np.sqrt(mean_squared_error(y_true[:, idx], rounded[:, idx]))),
             "r2": float(r2_score(y_true[:, idx], rounded[:, idx])),
-            "accuracy": float((y_true[:, idx] == rounded[:, idx]).mean()),
-            "confusion_matrix": confusion_matrix(y_true[:, idx], rounded[:, idx], labels=labels).tolist(),
         }
-        result[f"accuracy_{cls}"] = result[cls]["accuracy"]
     result["macro_mae"] = float(mean_absolute_error(y_true, rounded))
     result["macro_rmse"] = float(np.sqrt(mean_squared_error(y_true, rounded)))
     result["exact_image_match"] = float((rounded == y_true).all(axis=1).mean())
     return result
 
 
-def classification_loss(logits: dict[str, torch.Tensor], targets: torch.Tensor) -> torch.Tensor:
-    losses = []
-    for idx, cls in enumerate(CLASSES):
-        losses.append(LOSS_WEIGHTS[cls] * nn.functional.cross_entropy(logits[cls], targets[:, idx]))
-    return sum(losses)
-
-
-def platelet_sampler(train_df: pd.DataFrame, platelet_weight: float) -> WeightedRandomSampler:
-    weights = np.where(train_df["Platelets"].to_numpy() > 0, platelet_weight, 1.0).astype(np.float64)
-    return WeightedRandomSampler(weights=weights, num_samples=len(weights), replacement=True)
-
-
-def tune_count_bias(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, int]:
-    ranges = {
-        "RBC": range(-3, 4),
-        "WBC": range(-1, 2),
-        "Platelets": range(-2, 3),
-    }
-    best_bias = {cls: 0 for cls in CLASSES}
-    best_key = (-1.0, float("inf"))
-    for rbc_bias in ranges["RBC"]:
-        for wbc_bias in ranges["WBC"]:
-            for plt_bias in ranges["Platelets"]:
-                bias = {"RBC": rbc_bias, "WBC": wbc_bias, "Platelets": plt_bias}
-                adjusted = y_pred.copy()
-                for idx, cls in enumerate(CLASSES):
-                    adjusted[:, idx] = np.clip(adjusted[:, idx] + bias[cls], 0, COUNT_RANGES[cls])
-                exact = float((adjusted == y_true).all(axis=1).mean())
-                mae = float(mean_absolute_error(y_true, adjusted))
-                key = (exact, -mae)
-                if key > best_key:
-                    best_key = key
-                    best_bias = bias
-    return best_bias
-
-
-def train_count_classifier(
+def train_regressor(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     work_dir: Path,
@@ -456,70 +364,54 @@ def train_count_classifier(
     pretrained: bool,
     freeze_backbone: bool,
     num_workers: int,
-) -> tuple[CountClassifier, dict]:
-    train_ds = BCCDCountDataset(train_df, image_size=image_size, train=True)
-    val_ds = BCCDCountDataset(val_df, image_size=image_size, train=False)
-    sampler = platelet_sampler(train_df, platelet_weight=5.0)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, num_workers=num_workers, pin_memory=device.type == "cuda")
+) -> tuple[CountRegressor, dict]:
+    target_mean = train_df[CLASSES].to_numpy(dtype=np.float32).mean(axis=0)
+    target_std = train_df[CLASSES].to_numpy(dtype=np.float32).std(axis=0) + 1e-6
+    train_ds = BCCDCountDataset(train_df, image_size=image_size, train=True, target_mean=target_mean, target_std=target_std)
+    val_ds = BCCDCountDataset(val_df, image_size=image_size, train=False, target_mean=target_mean, target_std=target_std)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=device.type == "cuda")
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=device.type == "cuda")
 
-    model = CountClassifier(pretrained=pretrained, freeze_backbone=freeze_backbone).to(device)
+    model = CountRegressor(pretrained=pretrained, freeze_backbone=freeze_backbone).to(device)
     optimizer = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=lr, weight_decay=1e-4)
+    loss_fn = nn.SmoothL1Loss()
     scaler = torch.cuda.amp.GradScaler(enabled=device.type == "cuda")
 
     best_mae = float("inf")
-    best_path = work_dir / "count_classifier_best.pt"
-    best_bias = {cls: 0 for cls in CLASSES}
+    best_path = work_dir / "regression_best.pt"
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss = 0.0
-        for images, targets in tqdm(train_loader, desc=f"classification epoch {epoch}/{epochs}"):
+        for images, targets in tqdm(train_loader, desc=f"regression epoch {epoch}/{epochs}"):
             images = images.to(device)
             targets = targets.to(device)
             optimizer.zero_grad(set_to_none=True)
             with torch.cuda.amp.autocast(enabled=device.type == "cuda"):
-                loss = classification_loss(model(images), targets)
+                loss = loss_fn(model(images), targets)
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
             train_loss += loss.item() * images.size(0)
 
-        raw_preds, y_true = predict_counts(model, val_loader, device)
-        bias = tune_count_bias(y_true, raw_preds)
-        preds = raw_preds.copy()
-        for idx, cls in enumerate(CLASSES):
-            preds[:, idx] = np.clip(preds[:, idx] + bias[cls], 0, COUNT_RANGES[cls])
+        preds, y_true = predict_counts(model, val_loader, device, target_mean=target_mean, target_std=target_std)
         metrics = count_metrics(y_true, preds)
         val_mae = metrics["macro_mae"]
-        print(
-            f"epoch={epoch} train_loss={train_loss / len(train_ds):.4f} "
-            f"val_macro_mae={val_mae:.3f} exact={metrics['exact_image_match']:.3f} "
-            f"plt_acc={metrics['accuracy_Platelets']:.3f} bias={bias}"
-        )
+        print(f"epoch={epoch} train_loss={train_loss / len(train_ds):.4f} val_macro_mae={val_mae:.3f}")
         if val_mae < best_mae:
             best_mae = val_mae
-            best_bias = bias
             torch.save(
                 {
                     "state_dict": model.state_dict(),
-                    "bias": best_bias,
-                    "count_ranges": COUNT_RANGES,
+                    "target_mean": target_mean.tolist(),
+                    "target_std": target_std.tolist(),
                 },
                 best_path,
             )
 
     checkpoint = torch.load(best_path, map_location=device)
     model.load_state_dict(checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint)
-    best_bias = checkpoint.get("bias", best_bias) if isinstance(checkpoint, dict) else best_bias
-    preds, y_true = predict_counts(model, val_loader, device, bias=best_bias)
-    metrics = count_metrics(y_true, preds)
-    metrics["bias_correction"] = best_bias
-    metrics["loss_weights"] = LOSS_WEIGHTS
-    metrics["platelet_sampler_weight"] = 5.0
-    return model, metrics
-
-
-train_regressor = train_count_classifier
+    preds, y_true = predict_counts(model, val_loader, device, target_mean=target_mean, target_std=target_std)
+    return model, count_metrics(y_true, preds)
 
 
 def yolo_box_line(box: dict, width: float, height: float) -> str:
@@ -881,7 +773,7 @@ def combined_ood_scores(
 
 
 def run_ood_detection(
-    model: CountClassifier,
+    model: CountRegressor,
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
     work_dir: Path,
@@ -942,7 +834,7 @@ def save_metrics(metrics: dict, path: Path) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="BCCD count classification, YOLO counting, and OOD detection")
+    parser = argparse.ArgumentParser(description="BCCD regression, YOLO counting, and OOD detection")
     parser.add_argument("--data-dir", type=Path, default=BASE_DIR / "data")
     parser.add_argument("--work-dir", type=Path, default=BASE_DIR / "bccd_work")
     parser.add_argument("--external-ood-dir", type=Path, default=BASE_DIR / "data" / "external_ood")
@@ -950,7 +842,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--img-size", type=int, default=384)
+    parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--lr", type=float, default=2e-3)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument(
@@ -981,7 +873,7 @@ def main() -> None:
     analyze_and_visualize(df, args.work_dir / "figures")
     train_df, val_df = split_dataframe(df, args.seed)
 
-    model, classification_metrics = train_count_classifier(
+    model, regression_metrics = train_regressor(
         train_df=train_df,
         val_df=val_df,
         work_dir=args.work_dir,
@@ -995,7 +887,7 @@ def main() -> None:
         num_workers=args.num_workers,
     )
 
-    metrics = {"classification_resnet50_multihead": classification_metrics}
+    metrics = {"regression_resnet50": regression_metrics}
     if not args.skip_yolo:
         metrics[f"detection_{Path(args.yolo_model).stem}_counting"] = train_and_eval_yolo(
             train_df=train_df,
