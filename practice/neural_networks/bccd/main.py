@@ -588,7 +588,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--external-ood-dir", type=Path, default=BASE_DIR / "data" / "external_ood")
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda", "mps"])
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--lr", type=float, default=2e-3)
