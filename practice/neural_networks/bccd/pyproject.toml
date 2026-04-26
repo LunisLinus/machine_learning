@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bccd-cell-counting"
+version = "0.1.0"
+description = "BCCD cell counting with regression, YOLO detection, and OOD detection"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "matplotlib",
+    "numpy",
+    "pandas",
+    "pillow",
+    "requests",
+    "scikit-learn",
+    "torch",
+    "torchvision",
+    "tqdm",
+    "ultralytics",
+]
+
+[tool.setuptools]
+py-modules = ["main"]
