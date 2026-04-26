@@ -24,14 +24,14 @@ class CarvanaConfig:
     lr: float = 1e-3
     encoder_name: str = "mobilenet_v2"
     threshold: float = 0.5
-    validate_every: int = 5
+    validate_every: int = 1
     max_train_steps: int | None = 64
     max_val_steps: int | None = 16
     rotate_limit: int = 10
     background_perturb_p: float = 0.2
     background_noise_std: float = 10.0
     custom_base_channels: int = 32
-    high_res_size: tuple[int, int] = (256, 256)
+    high_res_size: tuple[int, int] = (512, 512)
     high_res_epochs: int = 2
     high_res_batch_size: int = 8 if torch.cuda.is_available() else 2
     high_res_max_train_steps: int | None = 32
