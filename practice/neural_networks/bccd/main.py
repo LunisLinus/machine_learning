@@ -6,6 +6,7 @@ import math
 import os
 import random
 import shutil
+import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,25 +40,29 @@ CLASS_TO_ID = {name: idx for idx, name in enumerate(CLASSES)}
 BCCD_URL = "https://github.com/Shenggan/BCCD_Dataset/archive/refs/heads/master.zip"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 BASE_DIR = Path(__file__).resolve().parent
+HTTP_HEADERS = {
+    "User-Agent": "bccd-cell-counting/0.1 (educational notebook; contact: local)",
+    "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+}
 REALISTIC_OOD_SOURCES = [
     {
         "name": "ecoli_niaid_16578744517.jpg",
-        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/E._coli_Bacteria_%2816578744517%29.jpg?width=800",
+        "title": "File:E. coli Bacteria (16578744517).jpg",
         "source": "Wikimedia Commons / NIAID, E. coli bacteria microscopy",
     },
     {
         "name": "ecoli_electron_microscopy.jpg",
-        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Escherichia_coli_electron_microscopy.jpg?width=800",
+        "title": "File:Escherichia coli electron microscopy.jpg",
         "source": "Wikimedia Commons / Janice Haney Carr, E. coli SEM",
     },
     {
         "name": "mouse_tissue_histology_23180949464.jpg",
-        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Mouse_tissue%2C_stained_histology_preparation_%2823180949464%29.jpg?width=800",
+        "title": "File:Mouse tissue, stained histology preparation (23180949464).jpg",
         "source": "Wikimedia Commons / ZEISS Microscopy, mouse tissue histology",
     },
     {
         "name": "mouse_tissue_histology_23782972906.jpg",
-        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Mouse_tissue%2C_stained_histology_preparation_%2823782972906%29.jpg?width=800",
+        "title": "File:Mouse tissue, stained histology preparation (23782972906).jpg",
         "source": "Wikimedia Commons / ZEISS Microscopy, mouse tissue histology",
     },
 ]
@@ -91,7 +96,7 @@ def select_device(requested: str) -> torch.device:
 
 def download_file(url: str, dst: Path, chunk_size: int = 1 << 20) -> None:
     dst.parent.mkdir(parents=True, exist_ok=True)
-    with requests.get(url, stream=True, timeout=60) as response:
+    with requests.get(url, stream=True, timeout=60, headers=HTTP_HEADERS) as response:
         response.raise_for_status()
         total = int(response.headers.get("content-length", 0))
         with dst.open("wb") as file, tqdm(total=total, unit="B", unit_scale=True, desc=dst.name) as pbar:
@@ -567,7 +572,7 @@ def save_corrupted_images(df: pd.DataFrame, out_dir: Path, corruption: str) -> l
 def list_external_images(external_dir: Path | None, fallback_dir: Path, count: int) -> list[str]:
     paths: list[Path] = []
     if external_dir and external_dir.exists():
-        paths = [p for p in external_dir.rglob("*") if p.suffix.lower() in IMAGE_EXTENSIONS]
+        paths = [p for p in external_dir.rglob("*") if p.suffix.lower() in IMAGE_EXTENSIONS and is_valid_image(p)]
     if paths:
         return [str(p) for p in paths[:count]]
 
@@ -600,15 +605,105 @@ def list_external_images(external_dir: Path | None, fallback_dir: Path, count: i
     return generated
 
 
+def is_valid_image(path: Path) -> bool:
+    try:
+        with Image.open(path) as image:
+            image.verify()
+        return True
+    except Exception:
+        return False
+
+
+def resolve_commons_image_url(title: str, width: int = 800) -> str:
+    response = request_with_retries(
+        "https://commons.wikimedia.org/w/api.php",
+        params={
+            "action": "query",
+            "format": "json",
+            "prop": "imageinfo",
+            "iiprop": "url",
+            "iiurlwidth": width,
+            "titles": title,
+        },
+        headers={
+            **HTTP_HEADERS,
+            "Accept": "application/json",
+        },
+        stream=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    pages = payload.get("query", {}).get("pages", {})
+    for page in pages.values():
+        imageinfo = page.get("imageinfo") or []
+        if imageinfo:
+            return imageinfo[0].get("thumburl") or imageinfo[0]["url"]
+    raise RuntimeError(f"Commons image URL was not resolved for {title!r}.")
+
+
+def request_with_retries(
+    url: str,
+    *,
+    params: dict | None = None,
+    headers: dict | None = None,
+    stream: bool = False,
+    attempts: int = 4,
+) -> requests.Response:
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            response = requests.get(
+                url,
+                params=params,
+                headers=headers or HTTP_HEADERS,
+                stream=stream,
+                timeout=60,
+                allow_redirects=True,
+            )
+            if response.status_code == 429 and attempt < attempts - 1:
+                retry_after = response.headers.get("retry-after")
+                delay = float(retry_after) if retry_after and retry_after.isdigit() else 3.0 * (attempt + 1)
+                response.close()
+                time.sleep(delay)
+                continue
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            last_exc = exc
+            if attempt < attempts - 1:
+                time.sleep(2.0 * (attempt + 1))
+                continue
+            raise
+    assert last_exc is not None
+    raise last_exc
+
+
+def download_image(url: str, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    with request_with_retries(url, headers=HTTP_HEADERS, stream=True) as response:
+        content_type = response.headers.get("content-type", "")
+        if "image" not in content_type.lower():
+            raise RuntimeError(f"Expected image content from {url}, got content-type={content_type!r}.")
+        total = int(response.headers.get("content-length", 0))
+        with dst.open("wb") as file, tqdm(total=total, unit="B", unit_scale=True, desc=dst.name) as pbar:
+            for chunk in response.iter_content(chunk_size=1 << 20):
+                if chunk:
+                    file.write(chunk)
+                    pbar.update(len(chunk))
+
+
 def download_realistic_external_ood(out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     downloaded: list[Path] = []
     metadata = []
     for item in REALISTIC_OOD_SOURCES:
         dst = out_dir / item["name"]
+        if dst.exists() and not is_valid_image(dst):
+            dst.unlink()
         if not dst.exists():
             try:
-                download_file(item["url"], dst)
+                url = resolve_commons_image_url(item["title"])
+                download_image(url, dst)
                 with Image.open(dst) as image:
                     image.verify()
             except Exception as exc:
@@ -616,8 +711,11 @@ def download_realistic_external_ood(out_dir: Path) -> list[Path]:
                 if dst.exists():
                     dst.unlink()
                 continue
+        else:
+            url = str(dst)
         downloaded.append(dst)
-        metadata.append(item)
+        metadata.append({**item, "resolved_url": url})
+        time.sleep(1.0)
 
     if metadata:
         (out_dir / "sources.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
