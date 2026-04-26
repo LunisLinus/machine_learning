@@ -243,9 +243,18 @@ def split_dataframe(df: pd.DataFrame, seed: int) -> tuple[pd.DataFrame, pd.DataF
 
 
 class BCCDCountDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, image_size: int, train: bool):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        image_size: int,
+        train: bool,
+        target_mean: np.ndarray | None = None,
+        target_std: np.ndarray | None = None,
+    ):
         require_torchvision()
         self.df = df.reset_index(drop=True)
+        self.target_mean = target_mean
+        self.target_std = target_std
         aug = [
             transforms.Resize((image_size, image_size)),
         ]
@@ -267,7 +276,10 @@ class BCCDCountDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
         row = self.df.iloc[idx]
         image = Image.open(row.image_path).convert("RGB")
-        target = torch.tensor([row[c] for c in CLASSES], dtype=torch.float32)
+        target_np = np.array([row[c] for c in CLASSES], dtype=np.float32)
+        if self.target_mean is not None and self.target_std is not None:
+            target_np = (target_np - self.target_mean) / self.target_std
+        target = torch.tensor(target_np, dtype=torch.float32)
         return self.transform(image), target
 
 
@@ -298,14 +310,25 @@ class CountRegressor(nn.Module):
 
 
 @torch.no_grad()
-def predict_counts(model: CountRegressor, loader: DataLoader, device: torch.device) -> tuple[np.ndarray, np.ndarray]:
+def predict_counts(
+    model: CountRegressor,
+    loader: DataLoader,
+    device: torch.device,
+    target_mean: np.ndarray | None = None,
+    target_std: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     model.eval()
     preds, targets = [], []
     for images, y in loader:
         images = images.to(device)
-        pred = model(images).clamp_min(0).cpu().numpy()
+        pred = model(images).cpu().numpy()
+        y_np = y.numpy()
+        if target_mean is not None and target_std is not None:
+            pred = pred * target_std + target_mean
+            y_np = y_np * target_std + target_mean
+        pred = np.clip(pred, 0, None)
         preds.append(pred)
-        targets.append(y.numpy())
+        targets.append(y_np)
     return np.vstack(preds), np.vstack(targets)
 
 
@@ -337,8 +360,10 @@ def train_regressor(
     freeze_backbone: bool,
     num_workers: int,
 ) -> tuple[CountRegressor, dict]:
-    train_ds = BCCDCountDataset(train_df, image_size=image_size, train=True)
-    val_ds = BCCDCountDataset(val_df, image_size=image_size, train=False)
+    target_mean = train_df[CLASSES].to_numpy(dtype=np.float32).mean(axis=0)
+    target_std = train_df[CLASSES].to_numpy(dtype=np.float32).std(axis=0) + 1e-6
+    train_ds = BCCDCountDataset(train_df, image_size=image_size, train=True, target_mean=target_mean, target_std=target_std)
+    val_ds = BCCDCountDataset(val_df, image_size=image_size, train=False, target_mean=target_mean, target_std=target_std)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=device.type == "cuda")
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=device.type == "cuda")
 
@@ -363,16 +388,24 @@ def train_regressor(
             scaler.update()
             train_loss += loss.item() * images.size(0)
 
-        preds, y_true = predict_counts(model, val_loader, device)
+        preds, y_true = predict_counts(model, val_loader, device, target_mean=target_mean, target_std=target_std)
         metrics = count_metrics(y_true, preds)
         val_mae = metrics["macro_mae"]
         print(f"epoch={epoch} train_loss={train_loss / len(train_ds):.4f} val_macro_mae={val_mae:.3f}")
         if val_mae < best_mae:
             best_mae = val_mae
-            torch.save(model.state_dict(), best_path)
+            torch.save(
+                {
+                    "state_dict": model.state_dict(),
+                    "target_mean": target_mean.tolist(),
+                    "target_std": target_std.tolist(),
+                },
+                best_path,
+            )
 
-    model.load_state_dict(torch.load(best_path, map_location=device))
-    preds, y_true = predict_counts(model, val_loader, device)
+    checkpoint = torch.load(best_path, map_location=device)
+    model.load_state_dict(checkpoint["state_dict"] if isinstance(checkpoint, dict) and "state_dict" in checkpoint else checkpoint)
+    preds, y_true = predict_counts(model, val_loader, device, target_mean=target_mean, target_std=target_std)
     return model, count_metrics(y_true, preds)
 
 
@@ -447,17 +480,43 @@ def train_and_eval_yolo(
     )
 
     image_paths = [str(path) for path in (work_dir / "yolo_dataset" / "images" / "val").glob("*")]
-    predictions = []
-    for result in model.predict(image_paths, imgsz=image_size, conf=0.25, iou=0.5, device=yolo_device, verbose=False):
-        counts = np.zeros(len(CLASSES), dtype=np.float32)
-        if result.boxes is not None and result.boxes.cls is not None:
-            for cls_id in result.boxes.cls.cpu().numpy().astype(int):
-                counts[cls_id] += 1
-        predictions.append(counts)
+    raw_predictions = []
+    for result in model.predict(image_paths, imgsz=image_size, conf=0.001, iou=0.5, device=yolo_device, verbose=False):
+        if result.boxes is None or result.boxes.cls is None:
+            raw_predictions.append((np.array([], dtype=np.int64), np.array([], dtype=np.float32)))
+            continue
+        raw_predictions.append(
+            (
+                result.boxes.cls.cpu().numpy().astype(int),
+                result.boxes.conf.cpu().numpy().astype(np.float32),
+            )
+        )
 
-    y_pred = np.vstack(predictions)
     y_true = val_df[CLASSES].to_numpy(dtype=np.float32)
-    return count_metrics(y_true, y_pred)
+    conf_grid = np.linspace(0.05, 0.70, 14)
+    best_conf = 0.25
+    best_mae = float("inf")
+    best_pred: np.ndarray | None = None
+    for conf in conf_grid:
+        predictions = []
+        for classes, scores in raw_predictions:
+            counts = np.zeros(len(CLASSES), dtype=np.float32)
+            keep = scores >= conf
+            for cls_id in classes[keep]:
+                if 0 <= cls_id < len(CLASSES):
+                    counts[cls_id] += 1
+            predictions.append(counts)
+        y_pred = np.vstack(predictions)
+        macro_mae = float(mean_absolute_error(y_true, y_pred))
+        if macro_mae < best_mae:
+            best_mae = macro_mae
+            best_conf = float(conf)
+            best_pred = y_pred
+
+    assert best_pred is not None
+    metrics = count_metrics(y_true, best_pred)
+    metrics["selected_confidence"] = best_conf
+    return metrics
 
 
 @torch.no_grad()
@@ -565,6 +624,33 @@ def download_realistic_external_ood(out_dir: Path) -> list[Path]:
     return downloaded
 
 
+def image_quality_features(image_path: str | Path) -> np.ndarray:
+    image = Image.open(image_path).convert("L").resize((224, 224))
+    gray = np.asarray(image, dtype=np.float32) / 255.0
+    laplacian = (
+        -4.0 * gray
+        + np.roll(gray, 1, axis=0)
+        + np.roll(gray, -1, axis=0)
+        + np.roll(gray, 1, axis=1)
+        + np.roll(gray, -1, axis=1)
+    )
+    dx = np.diff(gray, axis=1)
+    dy = np.diff(gray, axis=0)
+    return np.array(
+        [
+            float(laplacian.var()),
+            float(np.mean(np.abs(dx))),
+            float(np.mean(np.abs(dy))),
+            float(gray.std()),
+        ],
+        dtype=np.float32,
+    )
+
+
+def extract_quality_features(image_paths: Iterable[str]) -> np.ndarray:
+    return np.vstack([image_quality_features(path) for path in image_paths])
+
+
 def fit_ood_statistics(features: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     mean = features.mean(axis=0, keepdims=True)
     std = features.std(axis=0, keepdims=True) + 1e-6
@@ -573,6 +659,19 @@ def fit_ood_statistics(features: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 def ood_scores(features: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
     return np.mean(np.square((features - mean) / std), axis=1)
+
+
+def combined_ood_scores(
+    deep_features: np.ndarray,
+    quality_features: np.ndarray,
+    deep_mean: np.ndarray,
+    deep_std: np.ndarray,
+    quality_mean: np.ndarray,
+    quality_std: np.ndarray,
+) -> np.ndarray:
+    deep_score = ood_scores(deep_features, deep_mean, deep_std)
+    quality_score = ood_scores(quality_features, quality_mean, quality_std)
+    return deep_score + quality_score
 
 
 def run_ood_detection(
@@ -585,12 +684,15 @@ def run_ood_detection(
     external_ood_dir: Path | None,
 ) -> dict:
     train_features = extract_features(model, train_df.image_path, image_size, device)
+    train_quality = extract_quality_features(train_df.image_path)
     mean, std = fit_ood_statistics(train_features)
-    train_scores = ood_scores(train_features, mean, std)
+    quality_mean, quality_std = fit_ood_statistics(train_quality)
+    train_scores = combined_ood_scores(train_features, train_quality, mean, std, quality_mean, quality_std)
     threshold = float(np.quantile(train_scores, 0.95))
 
     clean_features = extract_features(model, val_df.image_path, image_size, device)
-    clean_scores = ood_scores(clean_features, mean, std)
+    clean_quality = extract_quality_features(val_df.image_path)
+    clean_scores = combined_ood_scores(clean_features, clean_quality, mean, std, quality_mean, quality_std)
 
     blur_paths = save_corrupted_images(val_df, work_dir / "ood" / "blur", "blur")
     noise_paths = save_corrupted_images(val_df, work_dir / "ood" / "noise", "noise")
@@ -599,7 +701,8 @@ def run_ood_detection(
     groups = {"clean": clean_scores}
     for name, paths in [("blur", blur_paths), ("noise", noise_paths), ("external", external_paths)]:
         feats = extract_features(model, paths, image_size, device)
-        groups[name] = ood_scores(feats, mean, std)
+        quality = extract_quality_features(paths)
+        groups[name] = combined_ood_scores(feats, quality, mean, std, quality_mean, quality_std)
 
     metrics = {"threshold_train_p95": threshold}
     for name, scores in groups.items():
