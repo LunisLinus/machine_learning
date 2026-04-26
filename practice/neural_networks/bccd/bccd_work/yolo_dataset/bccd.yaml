@@ -1,0 +1,7 @@
+path: C:\Users\linus\PycharmProjects\machine_learning\practice\neural_networks\bccd\bccd_work\yolo_dataset
+train: images/train
+val: images/val
+names:
+  0: RBC
+  1: WBC
+  2: Platelets
