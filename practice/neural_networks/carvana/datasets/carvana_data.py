@@ -16,7 +16,13 @@ from sklearn.model_selection import GroupShuffleSplit
 from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 
-from ..core.config import IMAGENET_MEAN, IMAGENET_STD, IMG_EXTS, MASK_EXTS, CarvanaConfig
+try:
+    from ..core.config import IMAGENET_MEAN, IMAGENET_STD, IMG_EXTS, MASK_EXTS, CarvanaConfig
+except ImportError as exc:
+    if "attempted relative import" not in str(exc) and "no known parent package" not in str(exc):
+        raise
+    # Supports notebook/script sessions that put the carvana directory itself on sys.path.
+    from core.config import IMAGENET_MEAN, IMAGENET_STD, IMG_EXTS, MASK_EXTS, CarvanaConfig
 
 
 def resolve_yandex_download_url(public_key: str) -> str:
