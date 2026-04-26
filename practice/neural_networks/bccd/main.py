@@ -39,6 +39,28 @@ CLASS_TO_ID = {name: idx for idx, name in enumerate(CLASSES)}
 BCCD_URL = "https://github.com/Shenggan/BCCD_Dataset/archive/refs/heads/master.zip"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp"}
 BASE_DIR = Path(__file__).resolve().parent
+REALISTIC_OOD_SOURCES = [
+    {
+        "name": "ecoli_niaid_16578744517.jpg",
+        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/E._coli_Bacteria_%2816578744517%29.jpg?width=800",
+        "source": "Wikimedia Commons / NIAID, E. coli bacteria microscopy",
+    },
+    {
+        "name": "ecoli_electron_microscopy.jpg",
+        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Escherichia_coli_electron_microscopy.jpg?width=800",
+        "source": "Wikimedia Commons / Janice Haney Carr, E. coli SEM",
+    },
+    {
+        "name": "mouse_tissue_histology_23180949464.jpg",
+        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Mouse_tissue%2C_stained_histology_preparation_%2823180949464%29.jpg?width=800",
+        "source": "Wikimedia Commons / ZEISS Microscopy, mouse tissue histology",
+    },
+    {
+        "name": "mouse_tissue_histology_23782972906.jpg",
+        "url": "https://commons.wikimedia.org/wiki/Special:FilePath/Mouse_tissue%2C_stained_histology_preparation_%2823782972906%29.jpg?width=800",
+        "source": "Wikimedia Commons / ZEISS Microscopy, mouse tissue histology",
+    },
+]
 
 
 def require_torchvision() -> None:
@@ -490,6 +512,11 @@ def list_external_images(external_dir: Path | None, fallback_dir: Path, count: i
     if paths:
         return [str(p) for p in paths[:count]]
 
+    if external_dir:
+        paths = download_realistic_external_ood(external_dir)
+        if paths:
+            return [str(p) for p in paths[:count]]
+
     fallback_dir.mkdir(parents=True, exist_ok=True)
     generated = []
     rng = np.random.default_rng(42)
@@ -512,6 +539,30 @@ def list_external_images(external_dir: Path | None, fallback_dir: Path, count: i
         image.save(dst)
         generated.append(str(dst))
     return generated
+
+
+def download_realistic_external_ood(out_dir: Path) -> list[Path]:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    downloaded: list[Path] = []
+    metadata = []
+    for item in REALISTIC_OOD_SOURCES:
+        dst = out_dir / item["name"]
+        if not dst.exists():
+            try:
+                download_file(item["url"], dst)
+                with Image.open(dst) as image:
+                    image.verify()
+            except Exception as exc:
+                print(f"Could not download external OOD image {item['name']}: {exc}")
+                if dst.exists():
+                    dst.unlink()
+                continue
+        downloaded.append(dst)
+        metadata.append(item)
+
+    if metadata:
+        (out_dir / "sources.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    return downloaded
 
 
 def fit_ood_statistics(features: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
