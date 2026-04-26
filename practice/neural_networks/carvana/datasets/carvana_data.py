@@ -195,18 +195,19 @@ def build_splits(config: CarvanaConfig) -> tuple[pd.DataFrame, pd.DataFrame, pd.
     return frame, train_df, val_df
 
 
-def build_transforms(img_size: tuple[int, int]) -> tuple[A.Compose, A.Compose]:
+def build_transforms(config: CarvanaConfig) -> tuple[A.Compose, A.Compose]:
     train_transform = A.Compose(
         [
-            A.Resize(img_size[0], img_size[1]),
+            A.Resize(config.img_size[0], config.img_size[1]),
             A.HorizontalFlip(p=0.5),
+            A.Rotate(limit=config.rotate_limit, p=0.5, border_mode=cv2.BORDER_CONSTANT),
             A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
             ToTensorV2(),
         ]
     )
     valid_transform = A.Compose(
         [
-            A.Resize(img_size[0], img_size[1]),
+            A.Resize(config.img_size[0], config.img_size[1]),
             A.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
             ToTensorV2(),
         ]
@@ -214,11 +215,33 @@ def build_transforms(img_size: tuple[int, int]) -> tuple[A.Compose, A.Compose]:
     return train_transform, valid_transform
 
 
+def perturb_background(
+    image: np.ndarray,
+    mask: np.ndarray,
+    noise_std: float = 10.0,
+    brightness_range: tuple[float, float] = (0.9, 1.1),
+) -> np.ndarray:
+    image_f = image.astype(np.float32).copy()
+    background = mask <= 0.5
+    noise = np.random.normal(0.0, noise_std, size=image_f.shape).astype(np.float32)
+    brightness = np.random.uniform(*brightness_range)
+    image_f[background] = image_f[background] * brightness + noise[background]
+    return np.clip(image_f, 0, 255).astype(np.uint8)
+
+
 class CarvanaSegDataset(Dataset):
-    def __init__(self, frame: pd.DataFrame, transforms: A.Compose | None = None):
+    def __init__(
+        self,
+        frame: pd.DataFrame,
+        transforms: A.Compose | None = None,
+        background_perturb_p: float = 0.0,
+        background_noise_std: float = 10.0,
+    ):
         self.image_paths = frame["image_path"].astype(str).tolist()
         self.mask_paths = frame["mask_path"].astype(str).tolist()
         self.transforms = transforms
+        self.background_perturb_p = background_perturb_p
+        self.background_noise_std = background_noise_std
 
     def __len__(self) -> int:
         return len(self.image_paths)
@@ -233,6 +256,9 @@ class CarvanaSegDataset(Dataset):
         if mask is None:
             raise FileNotFoundError(self.mask_paths[idx])
         mask = (mask > 127).astype(np.float32)
+
+        if self.background_perturb_p > 0.0 and np.random.rand() < self.background_perturb_p:
+            image = perturb_background(image, mask, noise_std=self.background_noise_std)
 
         if self.transforms is not None:
             transformed = self.transforms(image=image, mask=mask)
@@ -252,8 +278,13 @@ def create_loaders(
     val_df: pd.DataFrame,
     config: CarvanaConfig,
 ) -> tuple[DataLoader, DataLoader]:
-    train_transform, valid_transform = build_transforms(config.img_size)
-    train_ds = CarvanaSegDataset(train_df, transforms=train_transform)
+    train_transform, valid_transform = build_transforms(config)
+    train_ds = CarvanaSegDataset(
+        train_df,
+        transforms=train_transform,
+        background_perturb_p=config.background_perturb_p,
+        background_noise_std=config.background_noise_std,
+    )
     val_ds = CarvanaSegDataset(val_df, transforms=valid_transform)
 
     loader_kwargs = {

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import albumentations as A
 import cv2
@@ -14,11 +14,13 @@ from tqdm.auto import tqdm
 try:
     from ..core.config import IMAGENET_MEAN, IMAGENET_STD, CarvanaConfig, prepare_runtime
     from ..datasets.carvana_data import build_splits, create_loaders, load_mask, load_rgb
+    from ..modeling.custom_unet import CustomUNet
     from ..modeling.segmentation import BCE_LOSS, DICE_LOSS, batch_iou_dice_from_logits, binary_scores, make_smp_unet
 except ImportError:
     # Fallback for direct script-style launches where `carvana` is not imported as a package.
     from core.config import IMAGENET_MEAN, IMAGENET_STD, CarvanaConfig, prepare_runtime
     from datasets.carvana_data import build_splits, create_loaders, load_mask, load_rgb
+    from modeling.custom_unet import CustomUNet
     from modeling.segmentation import BCE_LOSS, DICE_LOSS, batch_iou_dice_from_logits, binary_scores, make_smp_unet
 
 
@@ -158,6 +160,56 @@ def train_model(
     return history_df, str(best_path)
 
 
+def build_model(model_name: str, encoder_name: str, custom_base_channels: int) -> torch.nn.Module:
+    if model_name == "custom_unet":
+        return CustomUNet(base_channels=custom_base_channels)
+    return make_smp_unet(encoder_name)
+
+
+def run_high_res_finetune(
+    model: torch.nn.Module,
+    model_name: str,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    loss_fn: torch.nn.Module,
+    config: CarvanaConfig,
+    device: torch.device,
+    use_amp: bool,
+    experiment_name: str,
+) -> tuple[pd.DataFrame, str]:
+    high_res_config = replace(
+        config,
+        img_size=config.high_res_size,
+        batch_size=config.high_res_batch_size,
+        epochs=config.high_res_epochs,
+        max_train_steps=config.high_res_max_train_steps,
+        max_val_steps=config.high_res_max_val_steps,
+    )
+    train_loader, val_loader = create_loaders(train_df, val_df, high_res_config)
+    print(
+        f"[{experiment_name}_highres] fine-tuning at {high_res_config.img_size} "
+        f"batch_size={high_res_config.batch_size}"
+    )
+    history_df, best_path = train_model(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        loss_fn=loss_fn,
+        device=device,
+        use_amp=use_amp,
+        epochs=high_res_config.epochs,
+        lr=config.lr * 0.5,
+        experiment_name=f"{experiment_name}_highres",
+        report_dir=config.report_dir,
+        model_dir=config.model_dir,
+        threshold=config.threshold,
+        validate_every=max(1, min(config.validate_every, high_res_config.epochs)),
+        max_train_steps=high_res_config.max_train_steps,
+        max_val_steps=high_res_config.max_val_steps,
+    )
+    return history_df, best_path
+
+
 @torch.inference_mode()
 def predict_prob_map_unet(
     model: torch.nn.Module,
@@ -214,7 +266,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-train-steps", type=int, default=None)
     parser.add_argument("--max-val-steps", type=int, default=None)
     parser.add_argument("--full-dataset", action="store_true")
-    parser.add_argument("--run-bce", action="store_true")
+    parser.add_argument("--run-custom", action="store_true")
+    parser.add_argument("--run-highres", action="store_true")
+    parser.add_argument("--custom-base-channels", type=int, default=None)
+    parser.add_argument("--high-res-size", type=int, nargs=2, metavar=("H", "W"), default=None)
+    parser.add_argument("--high-res-epochs", type=int, default=None)
+    parser.add_argument("--high-res-batch-size", type=int, default=None)
     parser.add_argument("--skip-bce", action="store_true")
     parser.add_argument("--skip-dice", action="store_true")
     parser.add_argument("--skip-eval", action="store_true")
@@ -244,6 +301,14 @@ def main() -> None:
         config.max_train_steps = args.max_train_steps
     if args.max_val_steps is not None:
         config.max_val_steps = args.max_val_steps
+    if args.custom_base_channels is not None:
+        config.custom_base_channels = args.custom_base_channels
+    if args.high_res_size is not None:
+        config.high_res_size = tuple(args.high_res_size)
+    if args.high_res_epochs is not None:
+        config.high_res_epochs = args.high_res_epochs
+    if args.high_res_batch_size is not None:
+        config.high_res_batch_size = args.high_res_batch_size
     if args.full_dataset:
         config.debug_max_samples = None
         config.max_train_steps = None
@@ -261,11 +326,14 @@ def main() -> None:
     histories: dict[str, pd.DataFrame] = {}
     best_paths: dict[str, str] = {}
 
-    run_bce = args.run_bce and not args.skip_bce
+    run_bce = not args.skip_bce
     run_dice = not args.skip_dice
+    run_custom = args.run_custom
+    run_highres = args.run_highres
 
     if run_bce:
-        bce_model = make_smp_unet(config.encoder_name).to(device).to(memory_format=torch.channels_last)
+        bce_model = build_model("smp_unet", config.encoder_name, config.custom_base_channels).to(device)
+        bce_model = bce_model.to(memory_format=torch.channels_last)
         bce_history, bce_best_path = train_model(
             model=bce_model,
             train_loader=train_loader,
@@ -285,9 +353,24 @@ def main() -> None:
         )
         histories["BCE"] = bce_history
         best_paths["BCE"] = bce_best_path
+        if run_highres:
+            bce_highres_history, bce_highres_best_path = run_high_res_finetune(
+                model=bce_model,
+                model_name="smp_unet",
+                train_df=train_df,
+                val_df=val_df,
+                loss_fn=BCE_LOSS,
+                config=config,
+                device=device,
+                use_amp=use_amp,
+                experiment_name="smp_unet_bce",
+            )
+            histories["BCE_highres"] = bce_highres_history
+            best_paths["BCE_highres"] = bce_highres_best_path
 
     if run_dice:
-        dice_model = make_smp_unet(config.encoder_name).to(device).to(memory_format=torch.channels_last)
+        dice_model = build_model("smp_unet", config.encoder_name, config.custom_base_channels).to(device)
+        dice_model = dice_model.to(memory_format=torch.channels_last)
         dice_history, dice_best_path = train_model(
             model=dice_model,
             train_loader=train_loader,
@@ -307,6 +390,56 @@ def main() -> None:
         )
         histories["DiceLoss"] = dice_history
         best_paths["DiceLoss"] = dice_best_path
+        if run_highres:
+            dice_highres_history, dice_highres_best_path = run_high_res_finetune(
+                model=dice_model,
+                model_name="smp_unet",
+                train_df=train_df,
+                val_df=val_df,
+                loss_fn=DICE_LOSS,
+                config=config,
+                device=device,
+                use_amp=use_amp,
+                experiment_name="smp_unet_dice",
+            )
+            histories["DiceLoss_highres"] = dice_highres_history
+            best_paths["DiceLoss_highres"] = dice_highres_best_path
+
+    if run_custom:
+        custom_model = build_model("custom_unet", config.encoder_name, config.custom_base_channels).to(device)
+        custom_history, custom_best_path = train_model(
+            model=custom_model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            loss_fn=DICE_LOSS,
+            device=device,
+            use_amp=use_amp,
+            epochs=config.epochs,
+            lr=config.lr,
+            experiment_name="custom_unet_dice",
+            report_dir=config.report_dir,
+            model_dir=config.model_dir,
+            threshold=config.threshold,
+            validate_every=config.validate_every,
+            max_train_steps=config.max_train_steps,
+            max_val_steps=config.max_val_steps,
+        )
+        histories["CustomUNet"] = custom_history
+        best_paths["CustomUNet"] = custom_best_path
+        if run_highres:
+            custom_highres_history, custom_highres_best_path = run_high_res_finetune(
+                model=custom_model,
+                model_name="custom_unet",
+                train_df=train_df,
+                val_df=val_df,
+                loss_fn=DICE_LOSS,
+                config=config,
+                device=device,
+                use_amp=use_amp,
+                experiment_name="custom_unet_dice",
+            )
+            histories["CustomUNet_highres"] = custom_highres_history
+            best_paths["CustomUNet_highres"] = custom_highres_best_path
 
     if histories:
         combined = []
@@ -321,9 +454,12 @@ def main() -> None:
 
     summary_rows = []
     for name, best_path in best_paths.items():
-        model = make_smp_unet(config.encoder_name).to(device).to(memory_format=torch.channels_last)
+        model_type = "custom_unet" if "CustomUNet" in name else "smp_unet"
+        eval_image_size = config.high_res_size if "highres" in name.lower() else config.img_size
+        model = build_model(model_type, config.encoder_name, config.custom_base_channels).to(device)
+        model = model.to(memory_format=torch.channels_last)
         model.load_state_dict(torch.load(best_path, map_location=device))
-        eval_df = evaluate_unet_on_dataframe(model, val_df, config.img_size, device)
+        eval_df = evaluate_unet_on_dataframe(model, val_df, eval_image_size, device)
         eval_df.to_csv(config.report_dir / f"{name.lower()}_eval.csv", index=False)
         summary_rows.append(
             {
