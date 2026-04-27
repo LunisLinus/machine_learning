@@ -854,7 +854,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--unfreeze-backbone", action="store_true")
     parser.add_argument("--force-download", action="store_true")
     parser.add_argument("--skip-yolo", action="store_true")
-    parser.add_argument("--yolo-model", default="yolo26n.pt", help="Ultralytics detector checkpoint, e.g. yolo26n.pt or yolov8n.pt.")
+    parser.add_argument("--yolo-model", default="yolov8s.pt", help="Ultralytics detector checkpoint, e.g. yolo26n.pt or yolov8n.pt.")
     parser.add_argument("--yolo-epochs", type=int, default=10)
     parser.add_argument("--yolo-img-size", type=int, default=640)
     return parser.parse_args()
