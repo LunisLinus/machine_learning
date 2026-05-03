@@ -30,11 +30,11 @@ def parse_args() -> argparse.Namespace:
         default=Path(__file__).resolve().parent / "artifacts" / "detection",
         help="Directory where YOLO outputs and count metrics will be stored.",
     )
-    parser.add_argument("--model", type=str, default="yolov8s.pt")
-    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--model", type=str, default="yolo26n.pt")
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--conf-threshold", type=float, default=0.25)
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)

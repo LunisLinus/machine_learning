@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
         default=Path(__file__).resolve().parent / "artifacts" / "regression",
         help="Directory where checkpoints, predictions and metrics will be saved.",
     )
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
