@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
         default=Path(__file__).resolve().parent / "artifacts" / "detection",
         help="Directory where YOLO outputs and count metrics will be stored.",
     )
-    parser.add_argument("--model", type=str, default="yolov8n.pt")
+    parser.add_argument("--model", type=str, default="yolov8s.pt")
     parser.add_argument("--epochs", type=int, default=40)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--imgsz", type=int, default=640)
@@ -39,7 +39,68 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--iou-threshold", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--run-name", type=str, default="bccd_yolo")
+    parser.add_argument(
+        "--augmentation",
+        choices=("none", "mild", "strong"),
+        default="strong",
+        help="YOLO train-time augmentation preset. Strong is useful for the small BCCD dataset.",
+    )
     return parser.parse_args()
+
+
+def yolo_augmentation_kwargs(preset: str) -> dict[str, float | int]:
+    if preset == "none":
+        return {
+            "hsv_h": 0.0,
+            "hsv_s": 0.0,
+            "hsv_v": 0.0,
+            "degrees": 0.0,
+            "translate": 0.0,
+            "scale": 0.0,
+            "shear": 0.0,
+            "perspective": 0.0,
+            "flipud": 0.0,
+            "fliplr": 0.0,
+            "mosaic": 0.0,
+            "mixup": 0.0,
+            "copy_paste": 0.0,
+            "close_mosaic": 0,
+        }
+
+    if preset == "mild":
+        return {
+            "hsv_h": 0.01,
+            "hsv_s": 0.35,
+            "hsv_v": 0.25,
+            "degrees": 5.0,
+            "translate": 0.05,
+            "scale": 0.25,
+            "shear": 1.0,
+            "perspective": 0.0,
+            "flipud": 0.1,
+            "fliplr": 0.5,
+            "mosaic": 0.4,
+            "mixup": 0.0,
+            "copy_paste": 0.0,
+            "close_mosaic": 10,
+        }
+
+    return {
+        "hsv_h": 0.015,
+        "hsv_s": 0.55,
+        "hsv_v": 0.35,
+        "degrees": 12.0,
+        "translate": 0.08,
+        "scale": 0.35,
+        "shear": 2.0,
+        "perspective": 0.0005,
+        "flipud": 0.25,
+        "fliplr": 0.5,
+        "mosaic": 0.8,
+        "mixup": 0.08,
+        "copy_paste": 0.0,
+        "close_mosaic": 10,
+    }
 
 
 def extract_detection_metrics(validation_result: Any) -> dict[str, float]:
@@ -89,6 +150,7 @@ def main() -> None:
     yaml_path = prepare_yolo_dataset(args.dataset_dir, yolo_dir, split_ids)
 
     model = YOLO(args.model)
+    augmentation_kwargs = yolo_augmentation_kwargs(args.augmentation)
     train_result = model.train(
         data=str(yaml_path),
         epochs=args.epochs,
@@ -99,6 +161,7 @@ def main() -> None:
         project=str(args.output_dir / "runs"),
         name=args.run_name,
         exist_ok=True,
+        **augmentation_kwargs,
     )
 
     trainer = getattr(model, "trainer", None)
@@ -135,6 +198,10 @@ def main() -> None:
     write_json(
         {
             "weights": str(best_weights.resolve()),
+            "augmentation": {
+                "preset": args.augmentation,
+                "kwargs": augmentation_kwargs,
+            },
             "train_metrics": extract_detection_metrics(train_result),
             "dataset_yaml": str(yaml_path.resolve()),
             "detection_metrics": extract_detection_metrics(validation_result),

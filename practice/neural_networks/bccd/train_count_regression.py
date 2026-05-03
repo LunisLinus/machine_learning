@@ -34,6 +34,7 @@ class BCCDCountDataset(Dataset):
         image_size: int,
         target_classes: tuple[str, ...],
         train: bool,
+        augmentation: str,
     ) -> None:
         self.frame = frame.reset_index(drop=True)
         self.target_classes = target_classes
@@ -41,14 +42,23 @@ class BCCDCountDataset(Dataset):
         transform_steps: list[Any] = [
             transforms.Resize((image_size, image_size)),
         ]
-        if train:
+        if train and augmentation != "none":
             transform_steps.extend(
                 [
-                    transforms.RandomHorizontalFlip(),
-                    transforms.RandomVerticalFlip(),
-                    transforms.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1),
+                    transforms.RandomHorizontalFlip(p=0.5),
+                    transforms.RandomVerticalFlip(p=0.2),
+                    transforms.ColorJitter(brightness=0.12, contrast=0.12, saturation=0.12, hue=0.02),
                 ]
             )
+            if augmentation == "strong":
+                transform_steps.extend(
+                    [
+                        transforms.RandomAutocontrast(p=0.25),
+                        transforms.RandomAdjustSharpness(sharpness_factor=1.4, p=0.2),
+                        transforms.RandomGrayscale(p=0.05),
+                        transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))], p=0.2),
+                    ]
+                )
         transform_steps.extend(
             [
                 transforms.ToTensor(),
@@ -94,7 +104,7 @@ def parse_args() -> argparse.Namespace:
         default=Path(__file__).resolve().parent / "artifacts" / "regression",
         help="Directory where checkpoints, predictions and metrics will be saved.",
     )
-    parser.add_argument("--epochs", type=int, default=15)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -104,6 +114,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--separate-models", action="store_true", help="Train one regressor per cell class.")
     parser.add_argument("--no-pretrained", action="store_true", help="Disable ImageNet initialization.")
+    parser.add_argument(
+        "--augmentation",
+        choices=("none", "basic", "strong"),
+        default="strong",
+        help=(
+            "Train-time image augmentation for count regression. "
+            "The default keeps object counts unchanged while varying color, contrast, sharpness and blur."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -113,6 +132,7 @@ def make_dataloaders(
     batch_size: int,
     num_workers: int,
     target_classes: tuple[str, ...],
+    augmentation: str,
 ) -> dict[str, DataLoader]:
     loaders: dict[str, DataLoader] = {}
     for split_name in ("train", "val", "test"):
@@ -122,6 +142,7 @@ def make_dataloaders(
             image_size=image_size,
             target_classes=target_classes,
             train=split_name == "train",
+            augmentation=augmentation,
         )
         loaders[split_name] = DataLoader(
             dataset,
@@ -189,6 +210,7 @@ def train_single_configuration(
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         target_classes=target_classes,
+        augmentation=args.augmentation,
     )
 
     model = ResNetCountRegressor(num_outputs=len(target_classes), pretrained=not args.no_pretrained).to(args.device)
@@ -291,6 +313,7 @@ def main() -> None:
             {
                 "mode": "separate_models",
                 "class_order": list(CLASSES),
+                "augmentation": args.augmentation,
                 "individual_metrics": individual_metrics,
                 "merged_count_metrics": merged_metrics,
             },
@@ -310,6 +333,7 @@ def main() -> None:
             {
                 "mode": "multi_output",
                 "class_order": list(CLASSES),
+                "augmentation": args.augmentation,
                 "count_metrics": metrics,
             },
             args.output_dir / "metrics.json",
