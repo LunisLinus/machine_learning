@@ -15,6 +15,10 @@ __MACOSX
 *.gif
 .idea
 
+*.png
+*.jpg
+*.jpeg
+*.gif
 # Distribution / packaging
 .Python
 build/
