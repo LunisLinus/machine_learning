@@ -1,0 +1,7 @@
+model,val_iou_mean,val_dice_mean,checkpoint
+CustomUNet_highres,0.9522775430070389,0.9649060846311968,C:\Users\linus\PycharmProjects\machine_learning\practice\neural_networks\carvana\carvana_work\models\custom_unet_dice_highres_best.pt
+DiceLoss_highres,0.9496641194294035,0.9635620834181237,C:\Users\linus\PycharmProjects\machine_learning\practice\neural_networks\carvana\carvana_work\models\smp_unet_dice_highres_best.pt
+BCE_highres,0.9452623301883489,0.9612837021501844,C:\Users\linus\PycharmProjects\machine_learning\practice\neural_networks\carvana\carvana_work\models\smp_unet_bce_highres_best.pt
+CustomUNet,0.9451194762746467,0.9612772453196698,C:\Users\linus\PycharmProjects\machine_learning\practice\neural_networks\carvana\carvana_work\models\custom_unet_dice_best.pt
+DiceLoss,0.9398037881625468,0.9586735108139491,C:\Users\linus\PycharmProjects\machine_learning\practice\neural_networks\carvana\carvana_work\models\smp_unet_dice_best.pt
+BCE,0.9361788442679239,0.9566948065255848,C:\Users\linus\PycharmProjects\machine_learning\practice\neural_networks\carvana\carvana_work\models\smp_unet_bce_best.pt

@@ -1,0 +1,65 @@
+{
+  "weights": "C:\\Users\\linus\\PycharmProjects\\machine_learning\\practice\\neural_networks\\bccd\\artifacts\\detection\\runs\\bccd_yolo\\weights\\best.pt",
+  "augmentation": {
+    "preset": "strong",
+    "kwargs": {
+      "hsv_h": 0.015,
+      "hsv_s": 0.55,
+      "hsv_v": 0.35,
+      "degrees": 12.0,
+      "translate": 0.08,
+      "scale": 0.35,
+      "shear": 2.0,
+      "perspective": 0.0005,
+      "flipud": 0.25,
+      "fliplr": 0.5,
+      "mosaic": 0.8,
+      "mixup": 0.08,
+      "copy_paste": 0.0,
+      "close_mosaic": 10
+    }
+  },
+  "train_metrics": {
+    "map50": 0.9241688738517442,
+    "map50_95": 0.6311377778183502,
+    "map75": 0.7173185793748705
+  },
+  "dataset_yaml": "C:\\Users\\linus\\PycharmProjects\\machine_learning\\practice\\neural_networks\\bccd\\artifacts\\detection\\yolo_dataset\\bccd.yaml",
+  "detection_metrics": {
+    "map50": 0.893096334740899,
+    "map50_95": 0.6034028330513942,
+    "map75": 0.7060508363461149
+  },
+  "count_metrics": {
+    "per_class": {
+      "RBC": {
+        "mae": 9.88888931274414,
+        "rmse": 10.9404955440338,
+        "r2": -6.1658252244285805,
+        "mean_true": 11.18055534362793,
+        "mean_pred": 21.04166603088379
+      },
+      "WBC": {
+        "mae": 0.1388888955116272,
+        "rmse": 0.5,
+        "r2": -1.57654126351262,
+        "mean_true": 0.9861111044883728,
+        "mean_pred": 1.125
+      },
+      "Platelets": {
+        "mae": 0.4444444477558136,
+        "rmse": 0.8498365778058424,
+        "r2": 0.41490862969218456,
+        "mean_true": 0.9583333134651184,
+        "mean_pred": 1.3194444179534912
+      }
+    },
+    "overall": {
+      "mae_macro": 3.490740885337194,
+      "rmse_macro": 4.096777373946547,
+      "total_count_mae": 10.36111068725586,
+      "total_count_rmse": 11.368817000902073,
+      "exact_match_ratio": 0.0
+    }
+  }
+}
